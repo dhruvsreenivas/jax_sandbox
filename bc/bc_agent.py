@@ -1,4 +1,3 @@
-import jax
 from jax import grad, jit
 import jax.numpy as jnp
 import jax.nn as nn
@@ -52,8 +51,10 @@ class BCLearner:
         return -jnp.mean(log_probs)
 
     @jit
-    def update(self, params, opt_state, batch):
-        grads = grad(self.loss)(params, batch)
+    def update(self, params, opt_state, batch, rng_key):
+        states, _ = batch
+        states = jnp.array(states.numpy())
+        grads = grad(self.loss)(params, rng_key, states)
         updates, opt_state = self.optimizer.update(grads, opt_state)
         new_params = optax.apply_updates(params, updates)
         return new_params, opt_state
@@ -81,6 +82,8 @@ if __name__ == '__main__':
     parser.add_argument(
         '--expert-acs-path', type=str, default='cartpole_expert_actions.npy', help='path to expert actions dataset'
     )
+    parser.add_argument('--random-seed', type=int, default=69,
+                        help='seed for JAX PRNG sequence')
 
     args = parser.parse_args()
 
@@ -95,9 +98,9 @@ if __name__ == '__main__':
     bc_learner = BCLearner(env.action_space.n, args.learning_rate)
 
     # network and optimizer parameter initialization
-    rng_key = jax.random.PRNGKey(69)
+    rng_seq = hk.PRNGSequence(args.random_seed)
     params = bc_learner.network.init(
-        rng_key, jnp.zeros(env.observation_space.shape))
+        next(rng_seq), jnp.zeros(env.observation_space.shape))
     opt_state = bc_learner.optimizer.init(params)
 
     # get observations and actions
@@ -116,8 +119,9 @@ if __name__ == '__main__':
     # training loop
     for i in range(args.num_epochs):
         for batch in expert_dataloader:
-            params, opt_state = bc_learner.update(params, opt_state, batch)
+            params, opt_state = bc_learner.update(
+                params, opt_state, batch, next(rng_seq))
 
         if i % args.eval_frequency == 0:
-            loss = bc_learner.loss(params, batch)
-            print(f'Loss after epoch {i}: {loss}')
+            loss = bc_learner.loss(params, expert_dataset)
+            print(f'Mean log likelihood after epoch {i}: {-loss}')
