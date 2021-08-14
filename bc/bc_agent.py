@@ -41,8 +41,8 @@ class BCLearner:
     def loss(self, params, batch):
         # maximizing log probability of (s, a) batch
         states, actions = batch
-        states = jnp.array(states.numpy())
-        actions = jnp.array(actions.numpy())
+        states = jnp.array(states)
+        actions = jnp.array(actions)
         logits = self.network.apply(params, states)
 
         dist = tfp.distributions.Categorical(logits=logits)
@@ -53,7 +53,7 @@ class BCLearner:
     @jit
     def update(self, params, opt_state, batch, rng_key):
         states, _ = batch
-        states = jnp.array(states.numpy())
+        states = jnp.array(states)
         grads = grad(self.loss)(params, rng_key, states)
         updates, opt_state = self.optimizer.update(grads, opt_state)
         new_params = optax.apply_updates(params, updates)
