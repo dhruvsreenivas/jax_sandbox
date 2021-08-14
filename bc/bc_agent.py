@@ -109,7 +109,7 @@ if __name__ == '__main__':
 
     assert expert_obs.shape[0] == expert_acs.shape[0]
 
-    # get dataloaders
+    # get dataset and dataloader
     expert_dataset = TensorDataset(torch.from_numpy(
         expert_obs), torch.from_numpy(expert_acs))
 
