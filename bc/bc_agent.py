@@ -13,7 +13,7 @@ import gym
 import argparse
 
 
-class BCLearner:
+class BC_Learner:
     '''
     BC learning agent for discrete environments. Not using rlax library just to see how well I do.
     '''
@@ -52,9 +52,7 @@ class BCLearner:
 
     @jit
     def update(self, params, opt_state, batch, rng_key):
-        states, _ = batch
-        states = jnp.array(states)
-        grads = grad(self.loss)(params, rng_key, states)
+        grads = grad(self.loss)(params, rng_key, batch)
         updates, opt_state = self.optimizer.update(grads, opt_state)
         new_params = optax.apply_updates(params, updates)
         return new_params, opt_state
@@ -95,7 +93,7 @@ if __name__ == '__main__':
             'Current code only built for environments with discrete action spaces.')
 
     # BC learner initialization
-    bc_learner = BCLearner(env.action_space.n, args.learning_rate)
+    bc_learner = BC_Learner(env.action_space.n, args.learning_rate)
 
     # network and optimizer parameter initialization
     rng_seq = hk.PRNGSequence(args.random_seed)
