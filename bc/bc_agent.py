@@ -13,7 +13,7 @@ import gym
 import argparse
 
 
-class BC_Learner:
+class BCLearner:
     '''
     BC learning agent for discrete environments. Not using rlax library just to see how well I do.
     '''
@@ -93,7 +93,7 @@ if __name__ == '__main__':
             'Current code only built for environments with discrete action spaces.')
 
     # BC learner initialization
-    bc_learner = BC_Learner(env.action_space.n, args.learning_rate)
+    bc_learner = BCLearner(env.action_space.n, args.learning_rate)
 
     # network and optimizer parameter initialization
     rng_seq = hk.PRNGSequence(args.random_seed)
