@@ -10,13 +10,14 @@ batch_q_learning = vmap(rlax.q_learning)
 
 
 class DQNLearner:
-    def __init__(self, obs_dim, num_actions, gamma=0.99):
+    def __init__(self, obs_dim, num_actions, gamma=0.99, learning_rate=1e-3):
         self.input_dim = obs_dim
         self.output_dim = num_actions
 
         self.disc_factor = gamma
 
         self.q_network = hk.transform(self.forward_pass)
+        self.optimizer = optax.adam(learning_rate=learning_rate)
 
     def forward_pass(self, batch):
         states, _, _, _, _ = batch
