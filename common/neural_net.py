@@ -53,7 +53,7 @@ class ConvBackbone(hk.Module):
         
     def __call__(self, input):
         '''Output will not be flattened.'''
-        assert jnp.ndim(input) == 3, 'Not valid 2D input'
+        assert jnp.ndim(input) in [3, 4], 'Not valid 2D input'
         return self.trunk(input)
 
     def output_dim(self, in_shape):
@@ -76,15 +76,14 @@ class DiscreteQNetwork(hk.Module):
         self.cfg = cfg
         self.img_input = cfg.img_input
         
-        if cfg.img_input:
-            self.trunk = ConvBackbone(cfg.conv_args) # args contains the convolutional info
-        
-        self.q_function = MLP(cfg.mlp_args) # kwargs contains linear stuff, including output (action) dim > 1
-        
     def __call__(self, states):
-        features = hk.Flatten()(self.trunk(states)) if self.img_input else states
+        if self.img_input:
+            features = ConvBackbone(self.cfg.conv_args)(states)
+            features = hk.Flatten()(features)
+        else:
+            features = states
         
-        return self.q_function(features)
+        return MLP(self.cfg.mlp_args)(features)
     
 class ContinuousQNetwork(hk.Module):
     '''Continuous Q function network.'''
@@ -92,17 +91,16 @@ class ContinuousQNetwork(hk.Module):
         super().__init__()
         self.cfg = cfg
         self.img_input = cfg.img_input
-        
-        if cfg.img_input:
-            self.trunk = ConvBackbone(cfg.conv_args) # args contains the convolutional info
-        
-        self.q_function = MLP(cfg.mlp_args) # output dim in kwargs should be 1!
     
     def __call__(self, states, actions):
-        features = hk.Flatten()(self.trunk(states)) if self.img_input else states
+        if self.img_input:
+            features = ConvBackbone(self.cfg.conv_args)(states)
+            features = hk.Flatten()(features)
+        else:
+            features = states
         
         sa = jnp.concatenate((features, actions), axis=1)
-        return self.q_function(sa)
+        return MLP(self.cfg.mlp_args)(sa)
 
 class VNetwork(hk.Module):
     '''Traditional value network (s -> V(s)).'''
@@ -114,12 +112,14 @@ class VNetwork(hk.Module):
         if cfg.img_input:
             self.trunk = ConvBackbone(cfg.conv_args)
         
-        self.v_function = MLP(cfg.mlp_args) # kwargs here contains MLP info, output dim = 1
-        
     def __call__(self, states):
-        features = hk.Flatten()(self.trunk(states)) if self.img_input else states
+        if self.img_input:
+            features = ConvBackbone(self.cfg.conv_args)(states)
+            features = hk.Flatten()(features)
+        else:
+            features = states
         
-        return self.v_function(features)
+        return MLP(self.cfg.mlp_args)(features)
     
 class DiscretePolicy(hk.Module):
     '''Discrete policy network.'''
@@ -127,21 +127,22 @@ class DiscretePolicy(hk.Module):
         super().__init__()
         self.cfg = cfg
         self.img_input = cfg.img_input
-        
-        if cfg.img_input:
-            self.trunk = ConvBackbone(cfg.conv_args) # args contains the convolutional info
-        
+
         self.policy = MLP(cfg.mlp_args) # kwargs contains linear stuff, including output (action) dim
         
     def __call__(self, states):
-        features = hk.Flatten()(self.trunk(states)) if self.img_input else states
-        logits = self.policy(features)
+        if self.img_input:
+            features = ConvBackbone(self.cfg.conv_args)(states)
+            features = hk.Flatten()(features)
+        else:
+            features = states
         
-        return distrax.Categorical(logits=logits)
+        logits = MLP(self.cfg.mlp_args)(features)
+        return distrax.Transformed(distrax.Categorical(logits=logits))
 
     def feature_output_dim(self, in_shape):
         if self.img_input:
-            return self.trunk.output_dim(in_shape)
+            return ConvBackbone(self.cfg.conv_args).output_dim(in_shape)
         else:
             return in_shape
     
@@ -151,24 +152,22 @@ class ContinuousPolicy(hk.Module):
         super().__init__()
         self.cfg = cfg
         self.img_input = cfg.img_input
-        
-        if cfg.img_input:
-            self.trunk = ConvBackbone(cfg.conv_args) # args contains the convolutional info
-        
-        self.mean = MLP(cfg.mlp_args) # kwargs contains linear stuff, including output (action) dim
-        self.log_std = MLP(cfg.mlp_args)
     
     def __call__(self, states):
-        features = hk.Flatten()(self.trunk(states)) if self.img_input else states
+        if self.img_input:
+            features = ConvBackbone(self.cfg.conv_args)(states)
+            features = hk.Flatten()(features)
+        else:
+            features = states
         
-        mean = self.mean(features)
-        log_std = self.log_std(features)
+        # TODO: make sure the output is 2 * action_dim
+        mean, log_std = jnp.split(MLP(self.cfg.mlp_args)(features), 2, -1)
         std = jnp.exp(log_std)
         
-        return distrax.Normal(loc=mean, scale=std)
+        return distrax.Transformed(distrax.Normal(loc=mean, scale=std))
     
     def feature_output_dim(self, in_shape):
         if self.img_input:
-            return self.trunk.output_dim(in_shape)
+            return ConvBackbone(self.cfg.conv_args).output_dim(in_shape)
         else:
             return in_shape

@@ -27,5 +27,6 @@ class DQN:
         self.rng_seq = hk.PRNGSequence(cfg.seed)
         
         # online + target params
-        self.online_params = self.qnet.init(next(self.rng_seq), np.zeros(1, *cfg.obs_shape))
-        self.target_params = self.target_qnet.init(next(self.rng_seq), np.zeros(1, *cfg.obs_shape))
+        rng_key = next(self.rng_seq)
+        self.online_params = self.qnet.init(rng_key, np.zeros(1, *cfg.obs_shape))
+        self.target_params = self.target_qnet.init(rng_key, np.zeros(1, *cfg.obs_shape))
