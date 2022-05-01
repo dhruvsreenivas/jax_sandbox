@@ -1,0 +1,28 @@
+defaults:
+  - _self_
+  - task@global_: cartpole-v0 # just for kicks for now
+  - override hydra/launcher: submitit-local
+
+# general environment things (all specified later)
+n_actions: ???
+obs_shape: ???
+continuous: ???
+img_input: ???
+
+# optimization
+seed: 100
+opt: adam
+lr: 0.001
+
+# neural net settings
+conv_args:
+  - out_channels: 32, 64, 64
+  - kernel_sizes: 8, 4, 3
+  - strides: 4, 2, 1
+  - activation: relu
+
+mlp_args:
+  - hidden_size: 64
+  - output_size: ${n_actions}
+  - n_hidden_layers: 2
+  - activation: relu
