@@ -17,5 +17,12 @@ OPTIMIZERS = {
     'rmsprop': optax.rmsprop
 }
 
+def get_activation(act):
+    if act in ACTIVATIONS.keys():
+        return ACTIVATIONS[act]
+    raise ValueError('Activation not available.')
+
 def get_opt_class(opt_name) -> optax.GradientTransformation:
-    return OPTIMIZERS[opt_name]
+    if opt_name in OPTIMIZERS.keys():
+        return OPTIMIZERS[opt_name]
+    raise ValueError('Optimizer not available.')

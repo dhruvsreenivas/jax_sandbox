@@ -2,7 +2,6 @@ from common.neural_net import DiscreteQNetwork, ContinuousQNetwork
 from common.utils import *
 from common.dataset import TransitionBatch
 import haiku as hk
-import numpy as np
 import jax
 import rlax
 
@@ -19,7 +18,7 @@ class DQN:
         
         # transform for init/apply
         self.qnet = hk.transform(lambda x: self.qnet_fn(x))
-        self.target_qnet = hk.transform(lambda x: self.target_qnet(x))
+        self.target_qnet = hk.transform(lambda x: self.target_qnet_fn(x))
         
         # optimizer
         self.opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
@@ -30,11 +29,19 @@ class DQN:
         
         # online + target params
         rng_key = next(self.rng_seq)
-        self.online_params = self.qnet.init(rng_key, np.zeros(1, *cfg.obs_shape))
-        self.target_params = self.target_qnet.init(rng_key, np.zeros(1, *cfg.obs_shape))
+        self.online_params = self.qnet.init(rng_key, jnp.zeros(1, *cfg.obs_shape))
+        self.target_params = self.target_qnet.init(rng_key, jnp.zeros(1, *cfg.obs_shape))
         
         # opt state initialization
         self.opt_state = self.optimizer.init(self.online_params)
+        
+        # epsilon
+        self.eps = 0.1 # TODO: don't hardcode
+        
+    def get_action(self, state):
+        qs = self.qnet.apply(self.online_params, next(self.rng_seq), state)
+        a = rlax.epsilon_greedy().sample(next(self.rng_seq), qs, self.eps)
+        return a
         
     def target_update(self, tau=0.9):
         # TODO: make sure you know how to change parameters

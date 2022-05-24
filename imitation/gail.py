@@ -1,7 +1,6 @@
 from common.neural_net import *
 from common.dataset import ExpertBatch, TransitionBatch
 from common.utils import *
-import numpy as np
 
 class GAIL:
     '''Generative adversarial imitation learning.'''
@@ -24,7 +23,7 @@ class GAIL:
         self.rng_seq = hk.PRNGSequence(cfg.seed)
         
         # initialize discriminator params + opt state
-        self.disc_params = self.disc.init(next(self.rng_seq), np.zeros(1, cfg.obs_shape + cfg.n_actions))
+        self.disc_params = self.disc.init(next(self.rng_seq), jnp.zeros(1, cfg.obs_shape + cfg.n_actions))
         self.disc_opt_state = self.disc_opt.init(self.disc_params)
         
         # TODO create policy

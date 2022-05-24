@@ -20,7 +20,7 @@ class MLP(hk.Module):
     def __call__(self, input):
         assert jnp.ndim(input) > 0, 'Input must be a (1+)D JAX numpy array'
         
-        if jnp.ndim(input) > 1:
+        if jnp.ndim(input) > 2: # (batch_size, ...)
             input = hk.Flatten()(input)
         
         for _ in range(self.n_hidden_layers):
@@ -54,9 +54,12 @@ class ConvBackbone(hk.Module):
     def __call__(self, input):
         '''Output will not be flattened.'''
         assert jnp.ndim(input) in [3, 4], 'Not valid 2D input'
+        if jnp.ndim(input) == 3:
+            input = jnp.expand_dims(input, axis=1)
         return self.trunk(input)
 
     def output_dim(self, in_shape):
+        '''Flattened output dim.'''
         shape = in_shape # assumed, potentially channel dim is at end?
         for out_channel, kernel_size, stride in zip(self.out_channels, self.kernel_sizes, self.strides):
             hin = shape[1]
@@ -76,14 +79,19 @@ class DiscreteQNetwork(hk.Module):
         self.cfg = cfg
         self.img_input = cfg.img_input
         
+        if self.img_input:
+            self.conv = ConvBackbone(self.cfg.conv_args)
+            
+        self.mlp = MLP(self.cfg.mlp_args)
+        
     def __call__(self, states):
         if self.img_input:
-            features = ConvBackbone(self.cfg.conv_args)(states)
+            features = self.conv(states)
             features = hk.Flatten()(features)
         else:
             features = states
         
-        return MLP(self.cfg.mlp_args)(features)
+        return self.mlp(features)
     
 class ContinuousQNetwork(hk.Module):
     '''Continuous Q function network.'''
@@ -91,16 +99,21 @@ class ContinuousQNetwork(hk.Module):
         super().__init__()
         self.cfg = cfg
         self.img_input = cfg.img_input
+        
+        if self.img_input:
+            self.conv = ConvBackbone(self.cfg.conv_args)
+        
+        self.mlp = MLP(self.cfg.mlp_args)
     
     def __call__(self, states, actions):
         if self.img_input:
-            features = ConvBackbone(self.cfg.conv_args)(states)
+            features = self.conv(states)
             features = hk.Flatten()(features)
         else:
             features = states
         
         sa = jnp.concatenate((features, actions), axis=1)
-        return MLP(self.cfg.mlp_args)(sa)
+        return self.mlp(sa)
 
 class VNetwork(hk.Module):
     '''Traditional value network (s -> V(s)).'''
@@ -110,16 +123,19 @@ class VNetwork(hk.Module):
         self.img_input = cfg.img_input
         
         if cfg.img_input:
-            self.trunk = ConvBackbone(cfg.conv_args)
+            self.conv = ConvBackbone(cfg.conv_args)
+        
+        self.cfg.mlp_args.output_size = 1
+        self.mlp = MLP(self.cfg.mlp_args)
         
     def __call__(self, states):
         if self.img_input:
-            features = ConvBackbone(self.cfg.conv_args)(states)
+            features = self.conv(states)
             features = hk.Flatten()(features)
         else:
             features = states
         
-        return MLP(self.cfg.mlp_args)(features)
+        return self.mlp(features)
     
 class Policy(hk.Module):
     '''Discrete policy network.'''
@@ -127,16 +143,20 @@ class Policy(hk.Module):
         super().__init__()
         self.cfg = cfg
         self.img_input = cfg.img_input
+        if self.img_input:
+            self.conv = ConvBackbone(self.cfg.conv_args)
+        
+        self.mlp = MLP(self.cfg.mlp_args)
         self.continuous = cfg.continuous
         
     def __call__(self, states):
         if self.img_input:
-            features = ConvBackbone(self.cfg.conv_args)(states)
+            features = self.conv(states)
             features = hk.Flatten()(features)
         else:
             features = states
         
-        output = MLP(self.cfg.mlp_args)(features)
+        output = self.mlp(features)
         if self.continuous:
             assert output.shape[-1] % 2 == 0, "Can't have odd shape output"
             mean, log_std = jnp.split(output, 2, -1)
@@ -147,7 +167,7 @@ class Policy(hk.Module):
 
     def feature_output_dim(self, in_shape):
         if self.img_input:
-            return ConvBackbone(self.cfg.conv_args).output_dim(in_shape)
+            return self.conv.output_dim(in_shape)
         else:
             return in_shape
 
@@ -157,16 +177,21 @@ class DiscreteSharedPolicyValueNetwork(hk.Module):
         super().__init__()
         self.cfg = cfg
         self.img_input = cfg.img_input
+        if self.img_input:
+            self.conv = ConvBackbone(self.cfg.conv_args)
+        
+        self.value_mlp = MLP(self.cfg.mlp_args)
+        self.output_mlp = MLP(self.cfg.mlp_args)
         self.continuous = cfg.continuous
     
     def __call__(self, states):
         if self.img_input:
-            features = ConvBackbone(self.cfg.conv_args)(states)
+            features = self.conv(states)
         else:
             features = states
             
-        values = MLP(self.cfg.mlp_args)(features)
-        output = MLP(self.cfg.mlp_args)(features)
+        values = self.value_mlp(features)
+        output = self.output_mlp(features)
         
         if self.continuous:
             assert output.shape[-1] % 2 == 0, "Can't have odd shape output"

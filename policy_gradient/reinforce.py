@@ -1,18 +1,16 @@
 import jax
 import haiku as hk
 from common.neural_net import *
-from common.dataset import ExpertBatch
+from common.dataset import TransitionBatch
 from common.utils import get_opt_class
 import optax
 
-class BC:
+class REINFORCE:
+    '''Continuous REINFORCE algorithm.'''
     def __init__(self, cfg):
-        self.policy_fn = Policy(cfg)
-         
-        # transform to allow init + apply
-        self.policy = hk.transform(lambda x: self.policy_fn(x))
+        policy_fn = Policy(cfg)
+        self.policy = hk.transform(lambda x: policy_fn(x))
         
-        # optimizer
         self.opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
         self.opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.opt)
         
@@ -20,16 +18,18 @@ class BC:
         self.rng_seq = hk.PRNGSequence(cfg.seed)
         
         # initialization of params and opt state
-        self.params = self.policy.init(next(self.rng_seq), jnp.zeros(1, *cfg.obs_shape))
+        self.params = self.policy.init(next(self.rng_seq), np.zeros(1, *cfg.obs_shape))
         self.opt_state = self.optimizer.init(self.params)
-
-    def learn(self, batch: ExpertBatch):
+        
+    def learn(self, batch: TransitionBatch) -> None:
         # define loss fn and apply updates w.r.t parameters
         def loss_fn(params, rng_key, batch):
-            dist = self.policy.apply(params, rng_key, batch.states)
-            lp = dist.log_prob(batch.actions)
-            loss = -lp.mean()
-            return loss
+            sum_rewards = jnp.sum(batch.rewards) # R(traj)
+            
+            action_dists = self.policy.apply(params, rng_key, batch.states)
+            traj_lp = action_dists.log_prob(batch.actions).sum() # log pi_\theta(traj)
+            
+            return sum_rewards * traj_lp
         
         loss = loss_fn(self.params, next(self.rng_seq), batch)
         grads = jax.grad(loss_fn)(self.params, batch)
@@ -40,3 +40,5 @@ class BC:
         self.opt_state = new_opt_state
         
         return loss.item()
+            
+            
