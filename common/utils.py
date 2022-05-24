@@ -17,5 +17,5 @@ OPTIMIZERS = {
     'rmsprop': optax.rmsprop
 }
 
-def get_opt_class(opt_name):
+def get_opt_class(opt_name) -> optax.GradientTransformation:
     return OPTIMIZERS[opt_name]

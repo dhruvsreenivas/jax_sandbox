@@ -8,6 +8,7 @@ n_actions: ???
 obs_shape: ???
 continuous: ???
 img_input: ???
+max_grad_norm: 0.5
 
 # optimization
 seed: 100

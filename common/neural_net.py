@@ -1,7 +1,7 @@
 import jax.numpy as jnp
 import haiku as hk
 import distrax
-from utils import ACTIVATIONS
+from common.utils import ACTIVATIONS
 import numpy as np
 
 '''Various neural network architectures for use in this repository.'''
@@ -121,14 +121,13 @@ class VNetwork(hk.Module):
         
         return MLP(self.cfg.mlp_args)(features)
     
-class DiscretePolicy(hk.Module):
+class Policy(hk.Module):
     '''Discrete policy network.'''
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         self.img_input = cfg.img_input
-
-        self.policy = MLP(cfg.mlp_args) # kwargs contains linear stuff, including output (action) dim
+        self.continuous = cfg.continuous
         
     def __call__(self, states):
         if self.img_input:
@@ -137,37 +136,45 @@ class DiscretePolicy(hk.Module):
         else:
             features = states
         
-        logits = MLP(self.cfg.mlp_args)(features)
-        return distrax.Transformed(distrax.Categorical(logits=logits))
+        output = MLP(self.cfg.mlp_args)(features)
+        if self.continuous:
+            assert output.shape[-1] % 2 == 0, "Can't have odd shape output"
+            mean, log_std = jnp.split(output, 2, -1)
+            std = jnp.exp(log_std)
+            return distrax.Normal(loc=mean, scale=std)
+        else:
+            return distrax.Categorical(logits=output)
 
     def feature_output_dim(self, in_shape):
         if self.img_input:
             return ConvBackbone(self.cfg.conv_args).output_dim(in_shape)
         else:
             return in_shape
-    
-class ContinuousPolicy(hk.Module):
-    '''Continuous policy network.'''
+
+class DiscreteSharedPolicyValueNetwork(hk.Module):
+    '''Same feature network with separate policy/value heads.'''
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         self.img_input = cfg.img_input
+        self.continuous = cfg.continuous
     
     def __call__(self, states):
         if self.img_input:
             features = ConvBackbone(self.cfg.conv_args)(states)
-            features = hk.Flatten()(features)
         else:
             features = states
+            
+        values = MLP(self.cfg.mlp_args)(features)
+        output = MLP(self.cfg.mlp_args)(features)
         
-        # TODO: make sure the output is 2 * action_dim
-        mean, log_std = jnp.split(MLP(self.cfg.mlp_args)(features), 2, -1)
-        std = jnp.exp(log_std)
-        
-        return distrax.Transformed(distrax.Normal(loc=mean, scale=std))
-    
-    def feature_output_dim(self, in_shape):
-        if self.img_input:
-            return ConvBackbone(self.cfg.conv_args).output_dim(in_shape)
+        if self.continuous:
+            assert output.shape[-1] % 2 == 0, "Can't have odd shape output"
+            mean, log_std = jnp.split(output, 2, -1)
+            std = jnp.exp(log_std)
+            dist = distrax.Normal(loc=mean, scale=std) # I think transformed takes care of this
         else:
-            return in_shape
+            dist = distrax.Categorical(logits=output)
+        
+        return values, dist
+        

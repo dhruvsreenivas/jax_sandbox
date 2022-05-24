@@ -8,16 +8,14 @@ import optax
 
 class BC:
     def __init__(self, cfg):
-        if cfg.continuous:
-            self.policy_fn = ContinuousPolicy(cfg)
-        else:
-            self.policy_fn = DiscretePolicy(cfg)
+        self.policy_fn = Policy(cfg)
          
         # transform to allow init + apply
         self.policy = hk.transform(lambda x: self.policy_fn(x))
         
         # optimizer
-        self.optimizer = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
+        self.opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
+        self.opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.opt)
         
         # rng sequence
         self.rng_seq = hk.PRNGSequence(cfg.seed)
@@ -35,8 +33,8 @@ class BC:
             return loss
         
         loss = loss_fn(self.params, next(self.rng_seq), batch)
-        grads = jax.grad(loss)(self.params, batch)
-        updates, new_opt_state = self.optimizer.update(grads, self.opt_state)
+        grads = jax.grad(loss_fn)(self.params, batch)
+        updates, new_opt_state = self.opt.update(grads, self.opt_state)
         new_params = optax.apply_updates(self.params, updates)
         
         self.params = new_params

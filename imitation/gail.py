@@ -18,6 +18,7 @@ class GAIL:
         
         # optimizer
         self.disc_opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
+        self.disc_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.disc_opt)
         
         # rng seq
         self.rng_seq = hk.PRNGSequence(cfg.seed)
