@@ -18,8 +18,8 @@ class REINFORCE:
         self.rng_seq = hk.PRNGSequence(cfg.seed)
         
         # initialization of params and opt state
-        self.params = self.policy.init(next(self.rng_seq), np.zeros(1, *cfg.obs_shape))
-        self.opt_state = self.optimizer.init(self.params)
+        self.params = self.policy.init(next(self.rng_seq), jnp.zeros(1, *cfg.obs_shape))
+        self.opt_state = self.opt.init(self.params)
         
     def learn(self, batch: TransitionBatch) -> None:
         # define loss fn and apply updates w.r.t parameters
