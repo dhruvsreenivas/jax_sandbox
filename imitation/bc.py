@@ -21,7 +21,7 @@ class BC:
         
         # initialization of params and opt state
         self.params = self.policy.init(next(self.rng_seq), jnp.zeros(1, *cfg.obs_shape))
-        self.opt_state = self.optimizer.init(self.params)
+        self.opt_state = self.opt.init(self.params)
 
     def learn(self, batch: ExpertBatch):
         # define loss fn and apply updates w.r.t parameters

@@ -33,7 +33,7 @@ class DQN:
         self.target_params = self.target_qnet.init(rng_key, jnp.zeros(1, *cfg.obs_shape))
         
         # opt state initialization
-        self.opt_state = self.optimizer.init(self.online_params)
+        self.opt_state = self.opt.init(self.online_params)
         
         # epsilon
         self.eps = 0.1 # TODO: don't hardcode
