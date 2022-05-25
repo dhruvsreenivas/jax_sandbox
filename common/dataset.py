@@ -33,11 +33,12 @@ class ReplayBuffer:
         
     def sample(self, batch_size):
         idxes = np.random.randint(len(self.states), size=batch_size)
-        states = np.concatenate([self.states[idx] for idx in idxes])
-        actions = np.concatenate([self.actions[idx] for idx in idxes])
-        rewards = np.concatenate([self.rewards[idx] for idx in idxes])
-        next_states = np.concatenate([self.next_states[idx] for idx in idxes])
-        dones = np.concatenate([self.dones[idx] for idx in idxes])
+        # do this because we're dealing with deques, not np.ndarrays
+        states = np.stack([self.states[idx] for idx in idxes])
+        actions = np.stack([self.actions[idx] for idx in idxes])
+        rewards = np.stack([self.rewards[idx] for idx in idxes])
+        next_states = np.stack([self.next_states[idx] for idx in idxes])
+        dones = np.stack([self.dones[idx] for idx in idxes])
         
         return TransitionBatch(states, actions, rewards, next_states, dones)
         
