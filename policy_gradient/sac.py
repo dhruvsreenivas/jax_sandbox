@@ -16,8 +16,9 @@ class SAC:
         # q1, q2 function params (TODO: add code for shared policy + value fn in all appropriate algorithms)
         qnet1_fn = ContinuousQNetwork(cfg)
         qnet2_fn = ContinuousQNetwork(cfg)
-        self.qnet1 = hk.transform(lambda x, a: qnet1_fn(x, a))
-        self.qnet2 = hk.transform(lambda x, a: qnet2_fn(x, a))
+        # deterministic functions, so rng is not needed when transforming
+        self.qnet1 = hk.without_apply_rng(hk.transform(lambda x, a: qnet1_fn(x, a)))
+        self.qnet2 = hk.without_apply_rng(hk.transform(lambda x, a: qnet2_fn(x, a)))
         
         # optimizers
         self.policy_opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)

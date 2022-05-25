@@ -16,7 +16,8 @@ class DQN:
         self.qnet_fn = DiscreteQNetwork(cfg)
         
         # transform for init/apply (qnet is shell fn, so you can pass both online + target params to this)
-        self.qnet = hk.transform(lambda x: self.qnet_fn(x))
+        # q function should be deterministic (no randomness added)
+        self.qnet = hk.without_apply_rng(hk.transform(lambda x: self.qnet_fn(x)))
         
         # optimizer
         self.opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)

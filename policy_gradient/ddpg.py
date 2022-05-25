@@ -14,7 +14,7 @@ class DDPG:
         self.policy = hk.transform(lambda x: policy_fn(x))
         
         qnet_fn = ContinuousQNetwork(cfg)
-        self.qnet = hk.transform(lambda x, a: qnet_fn(x, a))
+        self.qnet = hk.without_apply_rng(hk.transform(lambda x, a: qnet_fn(x, a)))
         
         # optimizers (gradient norm needed?)
         self.policy_opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
