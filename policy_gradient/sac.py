@@ -50,9 +50,8 @@ class SAC:
         
     def sample_actions(self, params, states, return_logprob=False):
         action_dist = self.policy.apply(params, next(self.rng_seq), states)
-        a = action_dist.sample(seed=next(self.rng_seq))
+        a, lps = action_dist.sample_and_log_prob(seed=next(self.rng_seq))
         if return_logprob:
-            lps = action_dist.log_prob(a)
             return a, lps
         return a
     
