@@ -31,8 +31,9 @@ class REINFORCE:
             
             return sum_rewards * traj_lp
         
-        loss = loss_fn(self.params, next(self.rng_seq), batch)
-        grads = jax.grad(loss_fn)(self.params, batch)
+        rng_key = next(self.rng_seq)
+        loss = loss_fn(self.params, rng_key, batch)
+        grads = jax.grad(loss_fn)(self.params, rng_key, batch)
         updates, new_opt_state = self.opt.update(grads, self.opt_state)
         new_params = optax.apply_updates(self.params, updates)
         

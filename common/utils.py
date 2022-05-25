@@ -26,3 +26,6 @@ def get_opt_class(opt_name) -> optax.GradientTransformation:
     if opt_name in OPTIMIZERS.keys():
         return OPTIMIZERS[opt_name]
     raise ValueError('Optimizer not available.')
+
+def ema_update(online_params, target_params, tau=0.9):
+    return optax.incremental_update(online_params, target_params, 1.0 - tau)

@@ -14,11 +14,9 @@ class DQN:
         assert not cfg.continuous, 'DQN only works with discrete action spaces.'
         # initialize q net and target q net
         self.qnet_fn = DiscreteQNetwork(cfg)
-        self.target_qnet_fn = DiscreteQNetwork(cfg)
         
-        # transform for init/apply
+        # transform for init/apply (qnet is shell fn, so you can pass both online + target params to this)
         self.qnet = hk.transform(lambda x: self.qnet_fn(x))
-        self.target_qnet = hk.transform(lambda x: self.target_qnet_fn(x))
         
         # optimizer
         self.opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
@@ -29,8 +27,7 @@ class DQN:
         
         # online + target params
         rng_key = next(self.rng_seq)
-        self.online_params = self.qnet.init(rng_key, jnp.zeros(1, *cfg.obs_shape))
-        self.target_params = self.target_qnet.init(rng_key, jnp.zeros(1, *cfg.obs_shape))
+        self.online_params = self.target_params = self.qnet.init(rng_key, jnp.zeros(1, *cfg.obs_shape))
         
         # opt state initialization
         self.opt_state = self.opt.init(self.online_params)
@@ -43,15 +40,11 @@ class DQN:
         a = rlax.epsilon_greedy().sample(next(self.rng_seq), qs, self.eps)
         return a
         
-    def target_update(self, tau=0.9):
-        # TODO: make sure you know how to change parameters
-        self.target_params = tau * self.target_params + (1 - tau) * self.online_params
-        
     def learn(self, batch: TransitionBatch):
         # define loss fn, then take gradient and step
         def loss_fn(params, target_params, rng_key, batch):
             online_rng_key, target_rng_key = jax.random.split(rng_key, 2)
-            targets = self.target_qnet.apply(target_params, target_rng_key, batch.next_states)
+            targets = self.qnet.apply(target_params, target_rng_key, batch.next_states)
             outputs = self.qnet.apply(params, online_rng_key, batch.states)
             
             td_errors = batch_q_learning_fn(
