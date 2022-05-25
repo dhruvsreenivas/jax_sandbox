@@ -12,7 +12,8 @@ class REINFORCE:
         self.policy = hk.transform(lambda x: policy_fn(x))
         
         self.opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
-        self.opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.opt)
+        if cfg.clip_grad_norm:
+            self.opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.opt)
         
         # rng sequence
         self.rng_seq = hk.PRNGSequence(cfg.seed)

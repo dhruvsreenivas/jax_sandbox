@@ -18,9 +18,10 @@ class DDPG:
         
         # optimizers (gradient norm needed?)
         self.policy_opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
-        self.policy_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.policy_opt)
         self.q_opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
-        self.q_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.q_opt)
+        if cfg.clip_grad_norm:
+            self.policy_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.policy_opt)
+            self.q_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.q_opt)
         
         # rng sequence
         self.rng_seq = hk.PRNGSequence(cfg.seed)

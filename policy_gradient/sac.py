@@ -22,11 +22,12 @@ class SAC:
         
         # optimizers
         self.policy_opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
-        self.policy_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.policy_opt)
         self.q1_opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
-        self.q1_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.q1_opt)
         self.q2_opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
-        self.q2_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.q2_opt)
+        if cfg.clip_grad_norm:
+            self.policy_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.policy_opt)
+            self.q1_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.q1_opt)
+            self.q2_opt = optax.chain(optax.clip_by_global_norm(cfg.max_grad_norm), self.q2_opt)
         
         # rng sequence
         self.rng_seq = hk.PRNGSequence(cfg.seed)
