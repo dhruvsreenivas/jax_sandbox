@@ -7,10 +7,8 @@ import optax
 
 class BC:
     def __init__(self, cfg):
-        self.policy_fn = Policy(cfg)
-         
-        # transform to allow init + apply
-        self.policy = hk.transform(lambda x: self.policy_fn(x))
+        # policy fn
+        self.policy = hk.transform(lambda x: Policy(cfg)(x))
         
         # optimizer
         self.opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
@@ -21,7 +19,7 @@ class BC:
         self.rng_seq = hk.PRNGSequence(cfg.seed)
         
         # initialization of params and opt state
-        self.params = self.policy.init(next(self.rng_seq), jnp.zeros(1, *cfg.obs_shape))
+        self.params = self.policy.init(next(self.rng_seq), jnp.zeros((1, *cfg.obs_shape)))
         self.opt_state = self.opt.init(self.params)
 
     def learn(self, batch: ExpertBatch):

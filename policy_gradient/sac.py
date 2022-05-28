@@ -10,15 +10,12 @@ from common.utils import get_opt_class
 class SAC:
     '''Continuous soft-actor critic.'''
     def __init__(self, cfg):
-        policy_fn = Policy(cfg)
-        self.policy = hk.transform(lambda x: policy_fn(x))
+        self.policy = hk.transform(lambda x: Policy(cfg)(x))
         
         # q1, q2 function params (TODO: add code for shared policy + value fn in all appropriate algorithms)
-        qnet1_fn = ContinuousQNetwork(cfg)
-        qnet2_fn = ContinuousQNetwork(cfg)
         # deterministic functions, so rng is not needed when transforming
-        self.qnet1 = hk.without_apply_rng(hk.transform(lambda x, a: qnet1_fn(x, a)))
-        self.qnet2 = hk.without_apply_rng(hk.transform(lambda x, a: qnet2_fn(x, a)))
+        self.qnet1 = hk.without_apply_rng(hk.transform(lambda x, a: ContinuousQNetwork(cfg)(x, a)))
+        self.qnet2 = hk.without_apply_rng(hk.transform(lambda x, a: ContinuousQNetwork(cfg)(x, a)))
         
         # optimizers
         self.policy_opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
@@ -34,15 +31,15 @@ class SAC:
         
         # initialization
         rng = next(self.rng_seq)
-        self.policy_params = self.policy.init(rng, jnp.zeros(1, *cfg.obs_shape))
+        self.policy_params = self.policy.init(rng, jnp.zeros((1, *cfg.obs_shape)))
         self.policy_opt_state = self.policy_opt.init(self.policy_params)
         
         rng = next(self.rng_seq)
-        self.q1_params = self.target_q1_params = self.qnet1.init(rng, jnp.zeros(1, *cfg.obs_shape))
+        self.q1_params = self.target_q1_params = self.qnet1.init(rng, jnp.zeros((1, np.prod(cfg.obs_shape))), jnp.ones((1, cfg.n_actions)))
         self.q1_opt_state = self.q1_opt.init(self.q1_params)
         
         rng = next(self.rng_seq)
-        self.q2_params = self.target_q2_params = self.qnet2.init(rng, jnp.zeros(1, *cfg.obs_shape))
+        self.q2_params = self.target_q2_params = self.qnet2.init(rng, jnp.zeros((1, np.prod(cfg.obs_shape))), jnp.ones((1, cfg.n_actions)))
         self.q2_opt_state = self.q2_opt.init(self.q2_params)
         
         # additional things
@@ -61,25 +58,22 @@ class SAC:
         def value_loss_fn(q1_params, q2_params, target_q1_params, target_q2_params, rng_key, batch):
             rng_key, rng_key2 = jax.random.split(rng_key) # two keys for two different q functions i think, although for apply probably not
             a_tp1, lps = self.sample_actions(batch.next_states, return_logprob=True)
-            sas_tp1 = jnp.concatenate((batch.next_states, a_tp1), axis=1)
-            q1_tp1 = self.qnet1.apply(target_q1_params, rng_key, sas_tp1)
-            q2_tp1 = self.qnet2.apply(target_q2_params, rng_key2, sas_tp1)
+            q1_tp1 = self.qnet1.apply(target_q1_params, rng_key, batch.next_states, a_tp1)
+            q2_tp1 = self.qnet2.apply(target_q2_params, rng_key2, batch.next_states, a_tp1)
             targets = batch.rewards + self.gamma * (1.0 - batch.dones) * (jnp.minimum(q1_tp1, q2_tp1) - self.temp * lps)
             
             rng_key, rng_key2 = jax.random.split(rng_key)
-            sas = jnp.concatenate((batch.states, batch.actions), axis=1)
-            q1s = self.qnet1.apply(q1_params, rng_key, sas)
-            q2s = self.qnet2.apply(q2_params, rng_key2, sas)
+            q1s = self.qnet1.apply(q1_params, rng_key, batch.states, batch.actions)
+            q2s = self.qnet2.apply(q2_params, rng_key2, batch.states, batch.actions)
             
             loss = rlax.l2_loss(q1s, targets) + rlax.l2_loss(q2s, targets)
             return loss.mean()
         
         def policy_loss_fn(policy_params, q1_params, q2_params, rng_key, batch):
             actions, lps = self.sample_actions(policy_params, batch.states, return_logprob=True)
-            sas = jnp.concatenate((batch.states, actions), axis=1)
             rng_key, rng_key2 = jax.random.split(rng_key) # same idea here as above
-            q1s = self.qnet1.apply(q1_params, rng_key, sas)
-            q2s = self.qnet2.apply(q2_params, rng_key2, sas)
+            q1s = self.qnet1.apply(q1_params, rng_key, batch.states, actions)
+            q2s = self.qnet2.apply(q2_params, rng_key2, batch.states, actions)
             qs = jnp.minimum(q1s, q2s)
             ent_reg_qs = qs - self.temp * lps
             

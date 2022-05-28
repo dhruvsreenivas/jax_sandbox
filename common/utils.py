@@ -28,4 +28,5 @@ def get_opt_class(opt_name) -> optax.GradientTransformation:
     raise ValueError('Optimizer not available.')
 
 def ema_update(online_params, target_params, tau=0.9):
+    '''Returns new params!'''
     return optax.incremental_update(online_params, target_params, 1.0 - tau)

@@ -8,15 +8,15 @@ class Workspace:
     def __init__(self, cfg):
         self.cfg = cfg
         if cfg.alg == 'bc':
-            self.learner = bc.BC(cfg.bc)
+            self.learner = bc.BC(cfg)
         elif cfg.alg == 'gail':
-            self.learner = gail.GAIL(cfg.gail)
+            self.learner = gail.GAIL(cfg)
         elif cfg.alg == 'ddpg':
-            self.learner = ddpg.DDPG(cfg.ddpg)
+            self.learner = ddpg.DDPG(cfg)
         elif cfg.alg == 'sac':
-            self.learner = sac.SAC(cfg.sac)
+            self.learner = sac.SAC(cfg)
         elif cfg.alg == 'dqn':
-            self.learner = dqn.DQN(cfg.dqn)
+            self.learner = dqn.DQN(cfg)
         else:
             raise ValueError('RL algorithm not implemented yet.')
 

@@ -12,12 +12,10 @@ class DQN:
         self.gamma = cfg.gamma
         
         assert not cfg.continuous, 'DQN only works with discrete action spaces.'
-        # initialize q net and target q net
-        self.qnet_fn = DiscreteQNetwork(cfg)
         
-        # transform for init/apply (qnet is shell fn, so you can pass both online + target params to this)
+        # transform q net for init/apply (qnet is shell fn, so you can pass both online + target params to this)
         # q function should be deterministic (no randomness added)
-        self.qnet = hk.without_apply_rng(hk.transform(lambda x: self.qnet_fn(x)))
+        self.qnet = hk.without_apply_rng(hk.transform(lambda x: DiscreteQNetwork(cfg)(x)))
         
         # optimizer
         self.opt = get_opt_class(cfg.opt)(learning_rate=cfg.lr)
@@ -29,7 +27,7 @@ class DQN:
         
         # online + target params
         rng_key = next(self.rng_seq)
-        self.online_params = self.target_params = self.qnet.init(rng_key, jnp.zeros(1, *cfg.obs_shape))
+        self.online_params = self.target_params = self.qnet.init(rng_key, jnp.zeros((1, *cfg.obs_shape)))
         
         # opt state initialization
         self.opt_state = self.opt.init(self.online_params)
@@ -58,7 +56,6 @@ class DQN:
             )
             
             losses = rlax.l2_loss(td_errors)
-            
             return jnp.mean(losses)
 
         rng_key = next(self.rng_seq)
