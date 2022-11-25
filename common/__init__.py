@@ -1,3 +1,3 @@
 import common.dataset as dataset
-import common.neural_net as neural_net
+import common.nets as nets
 import common.utils as utils

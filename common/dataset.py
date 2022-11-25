@@ -1,19 +1,28 @@
-from collections import namedtuple
+from typing import NamedTuple
 from collections import deque
 import numpy as np
 
-TransitionBatch = namedtuple('Transition', ['states', 'actions', 'rewards', 'next_states', 'dones'])
-ExpertBatch = namedtuple('ExpertBatch', ['states', 'actions'])
+class TransitionBatch(NamedTuple):
+    states: np.ndarray
+    actions: np.ndarray
+    rewards: np.ndarray
+    next_states: np.ndarray
+    dones: np.ndarray
+    
+class ExpertBatch(NamedTuple):
+    states: np.ndarray
+    actions: np.ndarray
 
 class ExpertDataset:
     '''Fixed size dataset.'''
     def __init__(self, states, actions):
         # states, actions both numpy arrays (for CPU usage, not to overload GPU probably)
+        assert states.shape[0] == actions.shape[0], 'Not the same number of states and actions.'
         self.states = states
         self.actions = actions
     
     def sample(self, batch_size):
-        idxes = np.random.randint(len(self.states), size=batch_size)
+        idxes = np.random.randint(self.states.shape[0], size=batch_size)
         return ExpertBatch(states=self.states[idxes], actions=self.actions[idxes])
         
 class ReplayBuffer:
