@@ -7,7 +7,7 @@ from common.nets import *
 from common.dataset import ExpertBatch
 from common.utils import *
 
-class BCTrainState(NamedTuple):
+class BCState(NamedTuple):
     params: hk.Params
     opt_state: optax.OptState
     rng_key: jax.random.PRNGKey
@@ -77,7 +77,7 @@ class BC:
         opt = opt_class(cfg.optim)(learning_rate=cfg.lr)
         opt_state = opt.init(params)
         
-        self._state = BCTrainState(
+        self._state = BCState(
             params=params,
             opt_state=opt_state,
             rng_key=state_key
@@ -95,7 +95,7 @@ class BC:
                 else:
                     key, subkey = jax.random.split(self._state.rng_key)
                     action = action_dist.sample(seed=subkey)
-                    self._state._replace(rng_key=key)
+                    self._state = self._state._replace(rng_key=key)
                     
             return action
         
@@ -110,14 +110,16 @@ class BC:
             
             return loss
         
-        def update(state: BCTrainState, batch: ExpertBatch) -> Tuple[BCTrainState, Dict]:
+        def update(state: BCState, batch: ExpertBatch, step: int) -> Tuple[BCState, Dict]:
+            del step
+            
             loss_grad_fn = jax.value_and_grad(loss_fn)
             loss, grads = loss_grad_fn(state.params, batch)
             
             update, new_opt_state = opt.update(grads, state.opt_state)
             new_params = optax.apply_updates(state.params, update)
             
-            new_state = BCTrainState(
+            new_state = BCState(
                 params=new_params,
                 opt_state=new_opt_state,
                 rng_key=state.rng_key

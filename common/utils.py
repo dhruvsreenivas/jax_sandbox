@@ -4,13 +4,16 @@ import optax
 import jax.numpy as jnp
 import jax.nn as nn
 import jax.lax as lax
+from jax.random import PRNGKey
+import distrax
 
 ACTIVATIONS = {
     'relu': nn.relu,
     'elu': nn.elu,
     'tanh': lax.tanh, # not in jax.nn
     'leaky_relu': nn.leaky_relu,
-    'sigmoid': nn.sigmoid
+    'sigmoid': nn.sigmoid,
+    'identity': lambda x: x
 }
 
 OPTIMIZERS = {
@@ -30,7 +33,7 @@ def opt_class(opt_name: str) -> optax.GradientTransformation:
         return OPTIMIZERS[opt_name]
     raise ValueError('Optimizer not available.')
 
-def ema_update(online_params: hk.Params, target_params: hk.Params, tau: float = 0.9) -> hk.Params:
+def update_target(online_params: hk.Params, target_params: hk.Params, tau: float = 0.9) -> hk.Params:
     '''Returns new params!'''
     return optax.incremental_update(online_params, target_params, tau)
 
@@ -38,3 +41,8 @@ def batched_zeros_like(shape) -> jnp.ndarray:
     if type(shape) == int:
         return jnp.zeros((1, shape))
     return jnp.zeros((1,) + tuple(shape))
+
+def sample_multiple(dist: distrax.Distribution, key: PRNGKey, n: int, log_prob: bool = True):
+    if log_prob:
+        return dist._sample_n_and_log_prob(key, n)
+    return dist._sample_n(key, n)
