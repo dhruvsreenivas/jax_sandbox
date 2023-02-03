@@ -1,10 +1,11 @@
 import warnings
 warnings.filterwarnings("ignore")
 
-from common import *
-from imitation import *
-from policy_gradient import *
-from value_based_methods import *
+from jax_sandbox.common import *
+from jax_sandbox.imitation import *
+from jax_sandbox.actor_critic import *
+from jax_sandbox.policy_gradient import *
+from jax_sandbox.value_based_methods import *
 import hydra
 
 import envs.dmc as dmc

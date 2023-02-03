@@ -69,7 +69,7 @@ class ConvTorso(hk.Module):
         
     def __call__(self, x):
         for channel, kernel, stride in zip(self._channels[:-1], self._kernels[:-1], self._strides[:-1]):
-            x = hk.Conv2D(channel, kernel_shape=kernel, stride=stride)
+            x = hk.Conv2D(channel, kernel_shape=kernel, stride=stride)(x)
             x = self._activation(x)
             
         x = hk.Conv2D(self._channels[-1], self._kernels[-1], self._strides[-1])

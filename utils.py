@@ -47,7 +47,7 @@ ENVS = {
 def is_discrete(env_name: str):
     if env_name in ['pong', 'breakout', 'beamrider', 'montezuma']:
         return True
-    elif env_name.startswith('cartpole-v') or env_name.startswith('lunarlander'):
+    elif env_name.startswith('cartpole') or env_name.startswith('lunarlander'):
         return True
     return False
 
