@@ -1,228 +1,250 @@
+import flax
+from flax import linen as nn
 import jax
 import jax.numpy as jnp
-import haiku as hk
 import optax
-from typing import NamedTuple, Tuple, Dict
+from typing import Sequence, Callable, Tuple
+from ml_collections import ConfigDict
+import functools
 
-from jax_sandbox.common.nets import *
-from jax_sandbox.common.dataset import TransitionBatch
-from jax_sandbox.common.utils import opt_class
+from jax_sandbox.nets import MLP
+from jax_sandbox.base_learner import Learner
+from jax_sandbox.dataset import Batch
+from jax_sandbox.utils import MetricsDict, TrainStateWithTarget
 
-class TD3State(NamedTuple):
-    actor_params: hk.Params
-    target_actor_params: hk.Params
-    critic_params: hk.Params
-    target_critic_params: hk.Params
+
+class Actor(nn.Module):
+    """Actor for TD3. Same as DDPG actor."""
     
-    actor_opt_state: optax.OptState
-    critic_opt_state: optax.OptState
+    action_dim: int
+    hidden_sizes: Sequence[int]
+    w_init: Callable[[jax.Array], jax.Array] = nn.initializers.he_uniform
+    activation: Callable[[jax.Array], jax.Array] = nn.relu
+    max_action: float = 1.0
     
-    rng_key: jax.random.PRNGKey
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+        
+        x = MLP(
+            hidden_sizes=self.hidden_sizes,
+            output_size=self.action_dim,
+            w_init=self.w_init,
+            activation=self.activation,
+        )(x)
+        
+        return jnp.tanh(x) * self.max_action
+    
+    
+class Critic(nn.Module):
+    """Critic for TD3. Twin critic formulation."""
+    
+    action_dim: int
+    hidden_sizes: Sequence[int]
+    w_init: Callable[[jax.Array], jax.Array] = nn.initializers.he_uniform
+    activation: Callable[[jax.Array], jax.Array] = nn.relu
+    
+    @nn.compact
+    def __call__(self, x: jax.Array, a: jax.Array) -> Tuple[jax.Array, jax.Array]:
+        assert a.shape[-1] == self.action_dim, f"Expected shape {self.action_dim} but got {a.shape[-1]}."
+        
+        xa = jnp.concatenate([x, a], axis=-1)
+        
+        q1 = MLP(
+            hidden_sizes=self.hidden_sizes,
+            output_size=1,
+            w_init=self.w_init,
+            activation=self.activation,
+            name="q1"
+        )(xa)
+        
+        q2 = MLP(
+            hidden_sizes=self.hidden_sizes,
+            output_size=1,
+            w_init=self.w_init,
+            activation=self.activation,
+            name="q2"
+        )(xa)
+        
+        return q1, q2
+    
+# ========================= Action + loss functions and update steps =========================
 
-class TD3:
-    def __init__(self, cfg):
-        # set up nets
-        if cfg.img_input:
-            channels = list(cfg.channels)
-            kernels = list(cfg.kernels)
-            strides = list(cfg.strides)
-            
-        assert cfg.continuous, "TD3 is for continuous control envs."
+@jax.jit
+def act(
+    actor_state: TrainStateWithTarget, observation: jax.Array
+) -> jax.Array:
+    """Jitted function to act."""
+    
+    action = actor_state.apply_fn(
+        {"params": actor_state.params}, observation
+    )
+    return action
+
+
+@functools.partial(jax.jit, static_argnames=("gamma", "tau", "max_action", "policy_noise", "noise_clip", "policy_freq"))
+def update_critic(
+    critic_state: TrainStateWithTarget,
+    actor_state: TrainStateWithTarget,
+    batch: Batch,
+    gamma: float,
+    tau: float,
+    max_action: jax.Array,
+    policy_noise: float,
+    noise_clip: float,
+    policy_freq: int,
+    rng: jax.random.PRNGKey,
+    step: int,
+) -> Tuple[TrainStateWithTarget, MetricsDict]:
+    """Critic update step."""
+    
+    def critic_loss_fn(params: flax.core.FrozenDict) -> Tuple[jax.Array, MetricsDict]:
+        """Critic loss function."""
         
-        if cfg.img_input:
-            if cfg.deterministic:
-                def actor_fn(s):
-                    net = hk.Sequential([
-                        ConvTorso(channels, kernels, strides, act=cfg.activation, activate_final=cfg.activate_final),
-                        hk.Linear(cfg.action_shape)
-                    ])
-                    return net(s)
-            else:
-                def actor_fn(s):
-                    net = hk.Sequential([
-                        ConvTorso(channels, kernels, strides, act=cfg.activation, activate_final=cfg.activate_final),
-                        LinearGaussian(cfg.action_shape)
-                    ])
-                    return net(s)
-                
-            def critic_fn(s, a):
-                sa = jnp.concatenate([s, a], axis=-1)
-                sa_rep = ConvTorso(channels, kernels, strides, act=cfg.activation, activate_final=cfg.activate_final)(sa)
-                q1, q2 = DoubleLinear(1)(sa_rep)
-                
-                return q1, q2
-        else:
-            if cfg.deterministic:
-                def actor_fn(s):
-                    net = hk.Sequential([
-                        MLP(cfg.hidden_sizes, act=cfg.activation, activate_final=cfg.activate_final, output_act=cfg.output_act, use_ln=cfg.use_ln),
-                        hk.Linear(cfg.action_shape)
-                    ])
-                    return net(s)
-            else:
-                def actor_fn(s):
-                    net = hk.Sequential([
-                        MLP(cfg.hidden_sizes, act=cfg.activation, activate_final=cfg.activate_final, output_act=cfg.output_act, use_ln=cfg.use_ln),
-                        LinearGaussian(cfg.action_shape)
-                    ])
-                    return net(s)
-                
-            def critic_fn(s, a):
-                sa = jnp.concatenate([s, a], axis=-1)
-                sa_rep = MLP(cfg.hidden_sizes, act=cfg.activation, activate_final=cfg.activate_final, output_act=cfg.output_act, use_ln=cfg.use_ln)(sa)
-                q1, q2 = DoubleLinear(1)(sa_rep)
-                return q1, q2
-            
-        actor = hk.without_apply_rng(hk.transform(actor_fn))
-        critic = hk.without_apply_rng(hk.transform(critic_fn))
+        # compute target Q values
+        noise = jax.random.normal(rng, shape=batch.actions.shape) * policy_noise
+        noise = jnp.clip(noise, -noise_clip, noise_clip)
         
-        # init
-        key = jax.random.PRNGKey(cfg.seed)
-        actor_key, critic_key, state_key = jax.random.split(key, 3)
-        actor_params = target_actor_params = actor.init(actor_key, batched_zeros_like(cfg.obs_shape))
-        critic_params = target_critic_params = critic.init(critic_key, batched_zeros_like(cfg.obs_shape), batched_zeros_like(cfg.action_shape))
+        next_actions = actor_state.apply_fn(
+            {"params": actor_state.target_params}, batch.next_observations
+        ) + noise
+        next_actions = jnp.clip(next_actions, -max_action, max_action)
         
-        actor_opt = opt_class(cfg.optim)(learning_rate=cfg.actor_lr)
-        actor_opt_state = actor_opt.init(actor_params)
+        target_q1, target_q2 = critic_state.apply_fn(
+            critic_state.target_params, batch.next_observations, next_actions
+        )
+        target_q = jnp.minimum(target_q1, target_q2)
+        target_q = batch.rewards + gamma * batch.not_dones * target_q
         
-        critic_opt = opt_class(cfg.optim)(learning_rate=cfg.critic_lr)
-        critic_opt_state = critic_opt.init(critic_params)
-        
-        self._state = TD3State(
-            actor_params=actor_params,
-            target_actor_params=target_actor_params,
-            critic_params=critic_params,
-            target_critic_params=target_critic_params,
-            actor_opt_state=actor_opt_state,
-            critic_opt_state=critic_opt_state,
-            rng_key=state_key
+        # compute current Q estimates
+        curr_q1, curr_q2 = critic_state.apply_fn(
+            {"params": params}, batch.observations, batch.actions
         )
         
-        # hparams
-        gamma = cfg.gamma
-        tau = cfg.tau
-        policy_noise = cfg.policy_noise
-        noise_clip = cfg.noise_clip
-        min_action = cfg.min_action
-        max_action = cfg.max_action
-        target_update_freq = cfg.target_update_freq
+        # compute loss
+        loss = jnp.mean(jnp.square(curr_q1 - target_q)) + jnp.mean(jnp.square(curr_q2 - target_q))
+        return loss, {"critic_loss": loss, "q1": jnp.mean(curr_q1)}
+
+    grads, metrics = jax.grad(critic_loss_fn, has_aux=True)(critic_state.params)
+    new_critic_state = critic_state.apply_gradients(grads=grads)
+    
+    if step % policy_freq == 0:
+        new_critic_target_params = optax.incremental_update(
+            new_critic_state.params, critic_state.target_params, tau
+        )
+        new_critic_state = new_critic_state.replace(
+            target_params=new_critic_target_params
+        )
         
-        # functions
-        def act(state: jnp.ndarray, eval_mode: bool) -> jnp.ndarray:
-            if cfg.deterministic:
-                action = actor.apply(self._state.actor_params, state)
-                key, subkey = jax.random.split(self._state.rng_key)
-                noise = policy_noise * jax.random.normal(subkey, shape=action.shape)
-                noise = jnp.clip(noise, -noise_clip, noise_clip)
-                action = jnp.clip(action + noise, min_action, max_action)
-            
-                self._state = self._state._replace(rng_key=key)
-            else:
-                action_dist = actor.apply(self._state.actor_params, state)
-                if eval_mode:
-                    action = action_dist.mean()
-                else:
-                    key, subkey = jax.random.split(self._state.rng_key)
-                    action = action_dist.sample(seed=subkey)
-                    
-                    self._state = self._state._replace(rng_key=key)
-                
-            return action
+    return new_critic_state, metrics
+
+
+@functools.partial(jax.jit, static_argnames=("tau",))
+def update_actor(
+    actor_state: TrainStateWithTarget,
+    critic_state: TrainStateWithTarget,
+    batch: Batch,
+    tau: float,
+) -> Tuple[TrainStateWithTarget, MetricsDict]:
+    """Actor update function."""
+    
+    def actor_loss_fn(params: flax.core.FrozenDict) -> Tuple[jax.Array, MetricsDict]:
+        """Actor loss function."""
         
-        @jax.jit
-        def critic_loss_fn(critic_params: hk.Params,
-                           target_critic_params: hk.Params,
-                           target_actor_params: hk.Params,
-                           key: jax.random.PRNGKey,
-                           batch: TransitionBatch) -> jnp.ndarray:
-            
-            if cfg.deterministic:
-                next_action = actor.apply(target_actor_params, batch.next_states)
-                noise = policy_noise * jax.random.normal(key, shape=next_action.shape)
-                noise = jnp.clip(noise, -noise_clip, noise_clip)
-                next_action = jnp.clip(next_action + noise, min_action, max_action)
-            else:
-                next_action_dist = actor.apply(target_actor_params, batch.next_states)
-                next_action = next_action_dist.sample(seed=key)
-                
-            next_q1, next_q2 = critic.apply(target_critic_params, batch.next_states, next_action)
-            next_q = jnp.minimum(next_q1, next_q2).squeeze()
-            next_v = batch.rewards + gamma * (1.0 - batch.dones) * next_q
-            
-            curr_q1, curr_q2 = critic.apply(critic_params, batch.states, batch.actions)
-            curr_q1 = jnp.squeeze(curr_q1)
-            curr_q2 = jnp.squeeze(curr_q2)
-            
-            loss = jnp.mean(jnp.square(curr_q1, next_v)) + jnp.mean(jnp.square(curr_q2, next_v))
-            return loss
+        actions = actor_state.apply_fn(
+            {"params": params}, batch.observations
+        )
+        q1, _ = critic_state.apply_fn(
+            {"params": critic_state.params}, batch.observations, actions
+        )
         
-        @jax.jit
-        def actor_loss_fn(actor_params: hk.Params,
-                          critic_params: hk.Params,
-                          batch: TransitionBatch):
-            
-            if cfg.deterministic:
-                actions = actor.apply(actor_params, batch.states)
-            else:
-                action_dist = actor.apply(actor_params, batch.states)
-                actions = action_dist.mean()
-            
-            q1, _ = critic.apply(critic_params, batch.states, actions)
-            return -jnp.mean(q1)
+        # compute loss
+        loss = -jnp.mean(q1)
+        return loss, {"actor_loss": loss}
+    
+    grads, metrics = jax.grad(actor_loss_fn, has_aux=True)(actor_state.params)
+    new_actor_state = actor_state.apply_gradients(grads=grads)
+    
+    # do target update always
+    new_actor_target_params = optax.incremental_update(
+        new_actor_state.params, actor_state.target_params, tau
+    )
+    new_actor_state = new_actor_state.replace(
+        target_params=new_actor_target_params
+    )
+    
+    return new_actor_state, metrics
+
+# ========================= Agent construction. =========================
+
+class TD3(Learner):
+    """Twin delayed deep deterministic policy gradients."""
+    
+    def __init__(self, config: ConfigDict):
+        self._config = config
         
-        def update(state: TD3State, batch: TransitionBatch, step: int) -> Tuple[TD3State, Dict]:
-            critic_key, state_key = jax.random.split(state.rng_key)
-            
-            # update critic
-            critic_loss_grad_fn = jax.value_and_grad(critic_loss_fn)
-            critic_loss, critic_grads = critic_loss_grad_fn(state.critic_params,
-                                                            state.target_critic_params,
-                                                            state.target_actor_params,
-                                                            critic_key,
-                                                            batch)
-            
-            critic_update, new_critic_opt_state = critic_opt.update(critic_grads, state.critic_opt_state)
-            new_critic_params = optax.apply_updates(state.critic_params, critic_update)
-            
-            metrics = {'critic_loss': critic_loss}
-            
-            # update actor + targets (if needed)
-            def update_actor_and_targets(_):
-                actor_loss_grad_fn = jax.value_and_grad(actor_loss_fn)
-                actor_loss, actor_grads = actor_loss_grad_fn(state.actor_params,
-                                                             new_critic_params,
-                                                             batch)
-                
-                actor_update, new_actor_opt_state = actor_opt.update(actor_grads, state.actor_opt_state)
-                new_actor_params = optax.apply_updates(state.actor_params, actor_update)
-                
-                new_target_actor_params = update_target(new_actor_params, state.target_actor_params, tau)
-                new_target_critic_params = update_target(new_critic_params, state.target_critic_params, tau)
-                
-                return actor_loss, new_actor_params, new_actor_opt_state, new_target_actor_params, new_target_critic_params
-            
-            def do_nothing(_):
-                return jnp.inf, state.actor_params, state.actor_opt_state, state.target_actor_params, state.target_critic_params
-            
-            actor_loss, new_actor_params, new_actor_opt_state, new_target_actor_params, new_target_critic_params = jax.lax.cond(
-                step % target_update_freq == 0,
-                update_actor_and_targets,
-                do_nothing,
-                operand=None
+        # set seeds
+        rng = jax.random.PRNGKey(config.seed)
+        self._rng, actor_rng, critic_rng = jax.random.split(rng, 3)
+        
+        # initialize actor
+        w_init = getattr(nn.initializers, config.w_init, nn.initializers.he_uniform)
+        activation = getattr(nn, config.activation, nn.relu)
+        actor = Actor(
+            config.action_dim, config.hidden_sizes,
+            w_init=w_init, activation=activation,
+            max_action=config.max_action, name="td3_actor"
+        )
+        actor_params = target_actor_params = actor.init(
+            actor_rng, jnp.zeros((1, config.observation_dim))
+        )["params"]
+        actor_optimizer = optax.adam(config.actor_lr)
+        
+        self._actor_state = TrainStateWithTarget.create(
+            apply_fn=actor.apply,
+            params=actor_params,
+            tx=actor_optimizer,
+            target_params=target_actor_params,
+        )
+        
+        # initialize critic
+        critic = Critic(
+            config.action_dim, config.hidden_sizes,
+            w_init=w_init, activation=activation,
+            name="td3_critic"
+        )
+        critic_params = target_critic_params = critic.init(
+            critic_rng, jnp.zeros((1, config.observation_dim)), jnp.zeros((1, config.action_dim))
+        )["params"]
+        critic_optimizer = optax.adam(config.critic_lr)
+        
+        self._critic_state = TrainStateWithTarget(
+            apply_fn=critic.apply,
+            params=critic_params,
+            tx=critic_optimizer,
+            target_params=target_critic_params
+        )
+        
+    def act(self, observation: jax.Array, eval: bool = False) -> jax.Array:
+        del eval
+        
+        return act(self._actor_state, observation)
+    
+    def update(self, batch: Batch, step: int) -> MetricsDict:
+        # first update critic
+        self._rng, update_rng = jax.random.split(self._rng)
+        
+        self._critic_state, metrics = update_critic(
+            self._critic_state, self._actor_state, batch,
+            self._config.gamma, self._config.tau, self._config.max_action,
+            self._config.policy_noise, self._config.noise_clip, self._config.policy_freq,
+            update_rng, step
+        )
+        
+        # now update actor
+        if step % self._config.policy_freq == 0:
+            self._actor_state, actor_metrics = update_actor(
+                self._actor_state, self._critic_state, batch, self._config.tau
             )
+            metrics.update(actor_metrics)
             
-            new_state = TD3State(
-                actor_params=new_actor_params,
-                target_actor_params=new_target_actor_params,
-                critic_params=new_critic_params,
-                target_critic_params=new_target_critic_params,
-                actor_opt_state=new_actor_opt_state,
-                critic_opt_state=new_critic_opt_state,
-                rng_key=state_key
-            )
-            
-            metrics.update({'actor_loss': actor_loss})
-            return new_state, metrics
-        
-        self._act = jax.jit(act)
-        self._update = jax.jit(update)
+        return metrics

@@ -1,249 +1,323 @@
+import flax
+from flax import linen as nn
+from flax.training.train_state import TrainState
 import jax
 import jax.numpy as jnp
-import haiku as hk
 import optax
-from typing import NamedTuple, Optional, Tuple, Dict
+import distrax
+from typing import Sequence, Callable, Tuple, Optional
+from ml_collections import ConfigDict
+import functools
 
-from jax_sandbox.common.nets import *
-from jax_sandbox.common.dataset import TransitionBatch
-from jax_sandbox.common.utils import opt_class
+from jax_sandbox.nets import MLP
+from jax_sandbox.base_learner import Learner
+from jax_sandbox.dataset import Batch
+from jax_sandbox.utils import MetricsDict, TrainStateWithTarget
+from jax_sandbox.distributions import TanhMultivariateNormalDiag
 
-class SACState(NamedTuple):
-    actor_params: hk.Params
-    critic_params: hk.Params
-    target_critic_params: hk.Params
-    log_alpha_params: Optional[hk.Params]
+
+class Actor(nn.Module):
+    """Actor for SAC."""
     
-    actor_opt_state: optax.OptState
-    critic_opt_state: optax.OptState
-    log_alpha_opt_state: Optional[optax.OptState]
+    action_dim: int
+    hidden_sizes: Sequence[int]
+    w_init: Callable[[jax.Array], jax.Array] = nn.initializers.he_uniform
+    activation: Callable[[jax.Array], jax.Array] = nn.relu
+    log_std_min: Optional[float] = -20.0
+    log_std_max: Optional[float] = 2.0
+    low: Optional[float] = None
+    high: Optional[float] = None
     
-    rng_key: jax.random.PRNGKey
-
-class SAC:
-    def __init__(self, cfg):
-        # set up actor + critic
-        if cfg.img_input:
-            channels = list(cfg.channels)
-            kernels = list(cfg.kernels)
-            strides = list(cfg.strides)
-            
-        assert cfg.continuous, "SAC is for continuous control envs."
-        assert not cfg.deterministic, "SAC requires entropy term, which means we need action distribution."
+    @nn.compact
+    def __call__(self, x: jax.Array) -> distrax.Distribution:
         
-        if cfg.img_input:
-            def actor_fn(s):
-                net = hk.Sequential([
-                    ConvTorso(channels, kernels, strides, act=cfg.activation, activate_final=cfg.activate_final),
-                    LinearGaussian(cfg.action_shape, softplus=cfg.softplus, min_std=cfg.min_std)
-                ])
-                return net(s)
-
-            def critic_fn(s, a):
-                sa = jnp.concatenate([s, a], axis=-1)
-                
-                sa_rep = ConvTorso(channels, kernels, strides, act=cfg.activation, activate_final=cfg.activate_final)(sa)
-                q1, q2 = DoubleLinear(1)(sa_rep)
-                return q1, q2
-            
-        else:
-            def actor_fn(s):
-                net = hk.Sequential([
-                    MLP(cfg.hidden_sizes, act=cfg.activation, activate_final=cfg.activate_final, use_ln=cfg.use_ln),
-                    LinearGaussian(cfg.action_shape, softplus=cfg.softplus, min_std=cfg.min_std)
-                ])
-                return net(s)
-            
-            def critic_fn(s, a):
-                sa = jnp.concatenate([s, a], dim=-1)
-                
-                sa_rep = MLP(cfg.hidden_sizes, act=cfg.activation, activate_final=cfg.activate_final, use_ln=cfg.use_ln)(sa)
-                q1, q2 = DoubleLinear(1)(sa_rep)
-                return q1, q2
-            
-        actor = hk.without_apply_rng(hk.transform(actor_fn))
-        critic = hk.without_apply_rng(hk.transform(critic_fn))
+        x = MLP(
+            hidden_sizes=self.hidden_sizes[:-1],
+            output_size=self.hidden_sizes[-1],
+            w_init=self.w_init,
+            activation=self.activation,
+            final_activation=self.activation,
+            name="sac_actor_trunk"
+        )(x)
         
-        # init
-        key = jax.random.PRNGKey(cfg.seed)
-        actor_key, critic_key, state_key = jax.random.split(key, 3)
+        mu = nn.Dense(
+            self.action_dim, kernel_init=self.w_init,
+        )(x)
+        logstd = nn.Dense(
+            self.action_dim, kernel_init=self.w_init
+        )(x)
         
-        actor_params = actor.init(actor_key, batched_zeros_like(cfg.obs_shape))
-        critic_params = target_critic_params = critic.init(critic_key, batched_zeros_like(cfg.obs_shape), batched_zeros_like(cfg.action_shape))
-        
-        actor_opt = opt_class(cfg.optim)(learning_rate=cfg.actor_lr)
-        actor_opt_state = actor_opt.init(actor_params)
-        critic_opt = opt_class(cfg.optim)(learning_rate=cfg.critic_lr)
-        critic_opt_state = critic_opt.init(critic_params)
-        
-        if cfg.tune_alpha:
-            log_alpha = jnp.asarray(0.0, dtype=jnp.float32)
-            alpha_opt = opt_class(cfg.optim)(learning_rate=cfg.alpha_lr)
-            alpha_opt_state = alpha_opt.init(log_alpha)
-        else:
-            log_alpha = None
-            alpha_opt_state = None
-            
-        self._state = SACState(
-            actor_params=actor_params,
-            critic_params=critic_params,
-            target_critic_params=target_critic_params,
-            log_alpha_params=log_alpha,
-            actor_opt_state=actor_opt_state,
-            critic_opt_state=critic_opt_state,
-            alpha_opt_state=alpha_opt_state,
-            rng_key=state_key
+        # clamp logstd
+        logstd = jnp.clip(
+            logstd, self.log_std_min, self.log_std_max
         )
         
-        # hparams
-        gamma = cfg.gamma
-        tau = cfg.tau
-        target_entropy = cfg.target_entropy
+        return TanhMultivariateNormalDiag(
+            loc=mu, scale=logstd, low=self.low, high=self.high
+        )
         
-        # functions
-        def act(state: jnp.ndarray, eval_mode: bool) -> jnp.ndarray:
-            action_dist = actor.apply(self._state.actor_params, state)
-            
-            if eval_mode:
-                action = action_dist.mode()
-            else:
-                key, subkey = jax.random.split(self._state.rng_key)
-                action = action_dist.sample(seed=subkey)
-                
-                self._state = self._state._replace(rng_key=key)
-                
-            return action
         
-        @jax.jit
-        def critic_loss_fn(critic_params: hk.Params,
-                           target_critic_params: hk.Params,
-                           actor_params: hk.Params,
-                           log_alpha: Optional[hk.Params],
-                           key: jax.random.PRNGKey,
-                           batch: TransitionBatch) -> jnp.ndarray:
-            
-            # get targets
-            next_action_dist = actor.apply(actor_params, batch.next_states)
-            next_actions = next_action_dist.sample(seed=key)
-            next_lps = next_action_dist.log_prob(next_actions).sum(-1)
-            
-            next_q1, next_q2 = critic.apply(target_critic_params, batch.next_states, next_actions)
-            next_q = jnp.minimum(next_q1, next_q2)
-            if cfg.tune_alpha:
-                alpha = jnp.exp(log_alpha)
-            else:
-                alpha = cfg.alpha
-            
-            next_q = next_q - alpha * next_lps
-            next_v = batch.rewards + gamma * (1.0 - batch.dones) * jnp.squeeze(next_q)
-            next_v = jax.lax.stop_gradient(next_v)
-            
-            # current estimates
-            curr_q1, curr_q2 = critic.apply(critic_params, batch.states, batch.actions)
-            curr_q1 = jnp.squeeze(curr_q1)
-            curr_q2 = jnp.squeeze(curr_q2)
-            
-            loss = jnp.mean(jnp.square(curr_q1 - next_v)) + jnp.mean(jnp.square(curr_q2, next_v))
-            return loss
+class Critic(nn.Module):
+    """SAC twin critic. Same as TD3 critic."""
+    
+    action_dim: int
+    hidden_sizes: Sequence[int]
+    w_init: Callable[[jax.Array], jax.Array] = nn.initializers.he_uniform
+    activation: Callable[[jax.Array], jax.Array] = nn.relu
+    
+    @nn.compact
+    def __call__(self, x: jax.Array, a: jax.Array) -> Tuple[jax.Array, jax.Array]:
+        assert a.shape[-1] == self.action_dim, f"Expected shape {self.action_dim} but got {a.shape[-1]}."
         
-        @jax.jit
-        def actor_loss_fn(actor_params: hk.Params,
-                          critic_params: hk.Params,
-                          log_alpha: Optional[hk.Params],
-                          key: jax.random.PRNGKey,
-                          batch: TransitionBatch) -> jnp.ndarray:
-            
-            action_dist = actor.apply(actor_params, batch.states)
-            actions = action_dist.sample(seed=key)
-            lps = action_dist.log_prob(actions).sum(-1)
-            
-            q1, q2 = critic.apply(critic_params, batch.states, actions)
-            if cfg.tune_alpha:
-                alpha = jnp.exp(log_alpha)
-            else:
-                alpha = cfg.alpha
-            
-            q = jnp.minimum(q1, q2).squeeze() - alpha * lps
-            loss = -jnp.mean(q)
-            return loss
+        xa = jnp.concatenate([x, a], axis=-1)
         
-        @jax.jit
-        def alpha_loss_fn(log_alpha: hk.Params,
-                          actor_params: hk.Params,
-                          key: jax.random.PRNGKey,
-                          batch: TransitionBatch) -> jnp.ndarray:
-            
-            action_dist = actor.apply(actor_params, batch.states)
-            action = action_dist.sample(seed=key)
-            lps = action_dist.log_prob(action).sum(-1)
-            alpha = jnp.exp(log_alpha)
-            
-            alpha_loss = alpha * jax.lax.stop_gradient(-lps - target_entropy)
-            return jnp.mean(alpha_loss)
+        q1 = MLP(
+            hidden_sizes=self.hidden_sizes,
+            output_size=1,
+            w_init=self.w_init,
+            activation=self.activation,
+            name="q1"
+        )(xa)
         
-        def update(state: SACState, batch: TransitionBatch, step: int) -> Tuple[SACState, Dict]:
-            del step
-            
-            # keys
-            critic_key, actor_key, alpha_key, state_key = jax.random.split(state.rng_key, 4)
-            
-            # update critic
-            critic_loss_grad_fn = jax.value_and_grad(critic_loss_fn)
-            critic_loss, critic_grads = critic_loss_grad_fn(state.critic_params,
-                                                           state.target_critic_params,
-                                                           state.actor_params,
-                                                           state.log_alpha_params,
-                                                           critic_key,
-                                                           batch)
-            
-            critic_update, new_critic_opt_state = critic_opt.update(critic_grads, state.critic_opt_state)
-            new_critic_params = optax.apply_updates(state.critic_params, critic_update)
-            
-            # update actor (and alpha)
-            actor_loss_grad_fn = jax.value_and_grad(actor_loss_fn)
-            actor_loss, actor_grads = actor_loss_grad_fn(state.actor_params,
-                                                         new_critic_params,
-                                                         state.log_alpha_params,
-                                                         actor_key,
-                                                         batch)
-            
-            actor_update, new_actor_opt_state = actor_opt.update(actor_grads, state.actor_opt_state)
-            new_actor_params = optax.apply_updates(state.actor_params, actor_update)
-            
-            if cfg.tune_alpha:
-                alpha_loss_grad_fn = jax.value_and_grad(alpha_loss_fn)
-                alpha_loss, alpha_grads = alpha_loss_grad_fn(state.log_alpha_params,
-                                                             new_actor_params,
-                                                             alpha_key,
-                                                             batch)
-                
-                alpha_update, new_alpha_opt_state = alpha_opt.update(alpha_grads, state.log_alpha_opt_state)
-                new_alpha_params = optax.apply_updates(state.log_alpha_params, alpha_update)
-            else:
-                alpha_loss = 0.0
-                new_alpha_params = None
-                new_alpha_opt_state = None
-                
-            new_target_critic_params = update_target(new_critic_params, state.target_critic_params, tau)
-            
-            state = SACState(
-                actor_params=new_actor_params,
-                critic_params=new_critic_params,
-                target_critic_params=new_target_critic_params,
-                log_alpha_params=new_alpha_params,
-                actor_opt_state=new_actor_opt_state,
-                critic_opt_state=new_critic_opt_state,
-                log_alpha_opt_state=new_alpha_opt_state,
-                rng_key=state_key
-            )
-            
-            metrics = {
-                'actor_loss': actor_loss,
-                'critic_loss': critic_loss,
-                'alpha_loss': alpha_loss
-            }
-            
-            return state, metrics
+        q2 = MLP(
+            hidden_sizes=self.hidden_sizes,
+            output_size=1,
+            w_init=self.w_init,
+            activation=self.activation,
+            name="q2"
+        )(xa)
         
-        self._act = jax.jit(act)
-        self._update = jax.jit(update)
+        return q1, q2
+    
+    
+class Temperature(nn.Module):
+    """Temperature parameter for SAC."""
+    
+    initial_value: float = 1.0
+    
+    @nn.compact
+    def __call__(self) -> jax.Array:
+        log_temp = self.param(
+            "log_temp",
+            init_fn=lambda key: jnp.full((), jnp.log(self.initial_value)),
+        )
+        return jnp.exp(log_temp)
+    
+# ========================= Action + loss functions and update steps =========================
+
+@jax.jit
+def act(
+    actor_state: TrainState, observation: jax.Array, eval: bool, rng: jax.random.PRNGKey
+) -> jax.Array:
+    """Jitted function to act."""
+    
+    action_dist = actor_state.apply_fn(
+        {"params": actor_state.params}, observation
+    )
+    return jnp.where(
+        eval,
+        action_dist.mode(),
+        action_dist.sample(seed=rng)
+    )
+
+
+@functools.partial(jax.jit, static_argnames=("gamma", "tau"))
+def update_critic(
+    critic_state: TrainStateWithTarget,
+    actor_state: TrainState,
+    temp_state: TrainState,
+    batch: Batch,
+    gamma: float,
+    tau: float,
+    rng: jax.random.PRNGKey,
+) -> Tuple[TrainStateWithTarget, MetricsDict]:
+    """SAC critic update step."""
+    
+    def critic_loss_fn(params: flax.core.FrozenDict) -> Tuple[jax.Array, MetricsDict]:
+        """Critic loss function."""
+        
+        # compute entropy regularized target Q values
+        next_action_dist = actor_state.apply_fn(
+            {"params": actor_state.params}, batch.next_observations
+        )
+        next_actions, next_log_probs = next_action_dist.sample_and_log_prob(seed=rng)
+        
+        target_q1, target_q2 = critic_state.apply_fn(
+            critic_state.target_params, batch.next_observations, next_actions
+        )
+        target_q = jnp.minimum(target_q1, target_q2)
+        
+        temp = temp_state.apply_fn({"params": temp_state.params})
+        target_q = batch.rewards + gamma * batch.not_dones * (target_q - temp * next_log_probs)
+        
+        # compute current Q estimates
+        curr_q1, curr_q2 = critic_state.apply_fn(
+            {"params": params}, batch.observations, batch.actions
+        )
+        loss = jnp.mean(jnp.square(curr_q1 - target_q)) + jnp.mean(jnp.square(curr_q2 - target_q))
+        
+        return loss, {"critic_loss": loss, "q1": jnp.mean(curr_q1)}
+    
+    # do the optimization
+    grads, metrics = jax.grad(critic_loss_fn, has_aux=True)(critic_state.params)
+    new_critic_state = critic_state.apply_gradients(grads=grads)
+    
+    # update the target parameters
+    new_target_params = optax.incremental_update(
+        new_critic_state.params, critic_state.target_params, tau
+    )
+    new_critic_state = new_critic_state.replace(
+        target_params=new_target_params
+    )
+    
+    return new_critic_state, metrics
+
+
+@jax.jit
+def update_actor(
+    actor_state: TrainState,
+    critic_state: TrainStateWithTarget,
+    temp_state: TrainState,
+    batch: Batch,
+    rng: jax.random.PRNGKey
+) -> Tuple[TrainState, MetricsDict]:
+    """SAC actor update step."""
+    
+    def actor_loss_fn(params: flax.core.FrozenDict) -> Tuple[jax.Array, MetricsDict]:
+        """Actor loss function."""
+        
+        action_dist = actor_state.apply_fn(
+            {"params": params}, batch.observations
+        )
+        actions, log_probs = action_dist.sample_and_log_prob(seed=rng)
+        
+        q1, q2 = critic_state.apply_fn(
+            {"params": critic_state.params}, batch.observations, actions
+        )
+        q = jnp.minimum(q1, q2)
+        
+        temp = temp_state.apply_fn({"params": temp_state.params})
+        q = q - temp * log_probs
+        
+        # compute loss and return
+        loss = -jnp.mean(q)
+        return loss, {"actor_loss": loss, "entropy": -jnp.mean(log_probs)}
+    
+    grads, metrics = jax.grad(actor_loss_fn, has_aux=True)(actor_state.params)
+    new_actor_state = actor_state.apply_gradients(grads=grads)
+    
+    return new_actor_state, metrics
+
+@functools.partial(jax.jit, static_argnames=("target_entropy"))
+def update_temperature(
+    temp_state: TrainState,
+    entropy: jax.Array,
+    target_entropy: float,
+) -> Tuple[TrainState, MetricsDict]:
+    """Temperature update step."""
+    
+    def temp_loss_fn(params: flax.core.FrozenDict) -> Tuple[jax.Array, MetricsDict]:
+        """Temperature loss function."""
+        
+        temp = temp_state.apply_fn({"params": params})
+        loss = temp * (entropy - target_entropy).mean()
+        
+        return loss, {"temp": temp, "temp_loss": loss}
+    
+    grads, metrics = jax.grad(temp_loss_fn)(temp_state.params)
+    new_temp_state = temp_state.apply_gradients(grads=grads)
+    
+    return new_temp_state, metrics
+
+
+class SAC(Learner):
+    """Soft actor-critic."""
+    
+    def __init__(self, config: ConfigDict):
+        self._config = config
+        
+        rng = jax.random.PRNGKey(config.seed)
+        self._rng, actor_rng, critic_rng, temp_rng = jax.random.split(rng, 4)
+        
+        # initialize actor
+        w_init = getattr(nn.initializers, config.w_init, nn.initializers.he_uniform)
+        activation = getattr(nn, config.activation, nn.relu)
+        actor = Actor(
+            config.action_dim, config.hidden_sizes, w_init,
+            activation, config.log_std_min, config.log_std_max,
+            config.low, config.high, name="sac_actor"
+        )
+        actor_params = actor.init(
+            actor_rng, jnp.zeros((1, config.observation_dim))
+        )["params"]
+        actor_optimizer = optax.adam(config.actor_lr)
+        
+        self._actor_state = TrainState.create(
+            apply_fn=actor.apply,
+            params=actor_params,
+            tx=actor_optimizer,
+        )
+        
+        # initialize critic
+        critic = Critic(
+            config.action_dim, config.hidden_sizes, w_init,
+            activation, name="sac_critic"
+        )
+        critic_params = target_critic_params = critic.init(
+            critic_rng, jnp.zeros((1, config.observation_dim)), jnp.zeros((1, config.action_dim))
+        )["params"]
+        critic_optimizer = optax.adam(config.critic_lr)
+        
+        self._critic_state = TrainStateWithTarget.create(
+            apply_fn=critic.apply,
+            params=critic_params,
+            tx=critic_optimizer,
+            target_params=target_critic_params
+        )
+        
+        # initialize temperature
+        temperature = Temperature(
+            config.initial_temp, name="sac_temperature"
+        )
+        temp_params = temperature.init(temp_rng)["params"]
+        temp_optimizer = optax.adam(config.temp_lr)
+        
+        self._temp_state = TrainState.create(
+            apply_fn=temperature.apply,
+            params=temp_params,
+            tx=temp_optimizer
+        )
+        
+        # set target temperature
+        self._target_entropy = config.target_entropy or -config.action_dim / 2
+        
+    def act(self, observation: jax.Array, eval: bool) -> jax.Array:
+        """SAC action function."""
+        
+        self._rng, act_rng = jax.random.split(self._rng)
+        return act(self._actor_state, observation, eval, act_rng)
+    
+    def update(self, batch: Batch, step: int) -> MetricsDict:
+        """SAC update step."""
+        del step
+        
+        self._rng, critic_update_rng, actor_update_rng = jax.random.split(self._rng)
+        
+        # first update critic
+        self._critic_state, critic_metrics = update_critic(
+            self._critic_state, self._actor_state, self._temp_state,
+            batch, self._config.gamma, self._config.tau, critic_update_rng
+        )
+        
+        # then update actor
+        self._actor_state, actor_metrics = update_actor(
+            self._actor_state, self._critic_state, self._temp_state,
+            batch, actor_update_rng
+        )
+        
+        # next update temperature
+        self._temp_state, temp_metrics = update_temperature(
+            self._temp_state, actor_metrics["entropy"], self._target_entropy
+        )
+        
+        return {**critic_metrics, **actor_metrics, **temp_metrics}
